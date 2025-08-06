@@ -7,6 +7,8 @@
 (define-constant ERR_EMPTY_SENTENCE (err u105))
 (define-constant ERR_INSUFFICIENT_FUNDS (err u106))
 (define-constant ERR_REWARD_TRANSFER_FAILED (err u107))
+(define-constant ERR_ALREADY_VOTED (err u108))
+(define-constant ERR_CANNOT_VOTE_OWN_CONTENT (err u109))
 
 (define-constant MAX_SENTENCE_LENGTH u280)
 (define-constant MIN_SENTENCE_LENGTH u5)
@@ -24,7 +26,9 @@
         created-at: uint,
         is-active: bool,
         reward-per-sentence: uint,
-        reward-pool: uint
+        reward-pool: uint,
+        total-votes: uint,
+        story-score: int
     }
 )
 
@@ -33,7 +37,10 @@
     {
         content: (string-utf8 280),
         author: principal,
-        added-at: uint
+        added-at: uint,
+        upvotes: uint,
+        downvotes: uint,
+        vote-score: int
     }
 )
 
@@ -48,8 +55,20 @@
         total-sentences: uint,
         stories-created: uint,
         stories-contributed: uint,
-        total-rewards-earned: uint
+        total-rewards-earned: uint,
+        votes-cast: uint,
+        votes-received: uint
     }
+)
+
+(define-map sentence-votes
+    { voter: principal, story-id: uint, sentence-id: uint }
+    { vote-type: bool }
+)
+
+(define-map story-votes
+    { voter: principal, story-id: uint }
+    { vote-type: bool }
 )
 
 (define-read-only (get-story-counter)
@@ -77,7 +96,7 @@
 
 (define-read-only (get-user-stats (user principal))
     (default-to
-        { total-sentences: u0, stories-created: u0, stories-contributed: u0, total-rewards-earned: u0 }
+        { total-sentences: u0, stories-created: u0, stories-contributed: u0, total-rewards-earned: u0, votes-cast: u0, votes-received: u0 }
         (map-get? user-stats { user: user })
     )
 )
@@ -147,7 +166,9 @@
                 created-at: current-block,
                 is-active: true,
                 reward-per-sentence: u0,
-                reward-pool: u0
+                reward-pool: u0,
+                total-votes: u0,
+                story-score: 0
             }
         )
         
@@ -176,7 +197,10 @@
             {
                 content: sentence,
                 author: tx-sender,
-                added-at: current-block
+                added-at: current-block,
+                upvotes: u0,
+                downvotes: u0,
+                vote-score: 0
             }
         )
         
@@ -322,5 +346,125 @@
         )
         
         (ok reward-per-sentence)
+    )
+)
+
+(define-read-only (get-sentence-vote (voter principal) (story-id uint) (sentence-id uint))
+    (map-get? sentence-votes { voter: voter, story-id: story-id, sentence-id: sentence-id })
+)
+
+(define-read-only (get-story-vote (voter principal) (story-id uint))
+    (map-get? story-votes { voter: voter, story-id: story-id })
+)
+
+(define-public (vote-sentence (story-id uint) (sentence-id uint) (is-upvote bool))
+    (let
+        (
+            (sentence-data (unwrap! (get-sentence story-id sentence-id) ERR_STORY_NOT_FOUND))
+            (story-data (unwrap! (get-story story-id) ERR_STORY_NOT_FOUND))
+            (sentence-author (get author sentence-data))
+            (existing-vote (get-sentence-vote tx-sender story-id sentence-id))
+            (current-upvotes (get upvotes sentence-data))
+            (current-downvotes (get downvotes sentence-data))
+            (current-score (get vote-score sentence-data))
+        )
+        (asserts! (not (is-eq tx-sender sentence-author)) ERR_CANNOT_VOTE_OWN_CONTENT)
+        (asserts! (is-none existing-vote) ERR_ALREADY_VOTED)
+        
+        (let
+            (
+                (new-upvotes (if is-upvote (+ current-upvotes u1) current-upvotes))
+                (new-downvotes (if is-upvote current-downvotes (+ current-downvotes u1)))
+                (score-change (if is-upvote 1 -1))
+                (new-score (+ current-score score-change))
+            )
+            (map-set sentence-votes
+                { voter: tx-sender, story-id: story-id, sentence-id: sentence-id }
+                { vote-type: is-upvote }
+            )
+            
+            (map-set story-sentences
+                { story-id: story-id, sentence-id: sentence-id }
+                (merge sentence-data {
+                    upvotes: new-upvotes,
+                    downvotes: new-downvotes,
+                    vote-score: new-score
+                })
+            )
+            
+            (update-story-vote-score story-id score-change)
+            (update-user-vote-stats tx-sender sentence-author)
+            (ok new-score)
+        )
+    )
+)
+
+(define-public (vote-story (story-id uint) (is-upvote bool))
+    (let
+        (
+            (story-data (unwrap! (get-story story-id) ERR_STORY_NOT_FOUND))
+            (story-creator (get creator story-data))
+            (existing-vote (get-story-vote tx-sender story-id))
+            (current-votes (get total-votes story-data))
+            (current-score (get story-score story-data))
+        )
+        (asserts! (not (is-eq tx-sender story-creator)) ERR_CANNOT_VOTE_OWN_CONTENT)
+        (asserts! (is-none existing-vote) ERR_ALREADY_VOTED)
+        
+        (let
+            (
+                (new-votes (+ current-votes u1))
+                (score-change (if is-upvote 1 -1))
+                (new-score (+ current-score score-change))
+            )
+            (map-set story-votes
+                { voter: tx-sender, story-id: story-id }
+                { vote-type: is-upvote }
+            )
+            
+            (map-set stories
+                { story-id: story-id }
+                (merge story-data {
+                    total-votes: new-votes,
+                    story-score: new-score
+                })
+            )
+            
+            (update-user-vote-stats tx-sender story-creator)
+            (ok new-score)
+        )
+    )
+)
+
+(define-private (update-story-vote-score (story-id uint) (score-change int))
+    (let
+        (
+            (story-data (unwrap-panic (get-story story-id)))
+            (current-score (get story-score story-data))
+            (new-score (+ current-score score-change))
+        )
+        (map-set stories
+            { story-id: story-id }
+            (merge story-data { story-score: new-score })
+        )
+    )
+)
+
+(define-private (update-user-vote-stats (voter principal) (content-author principal))
+    (let
+        (
+            (voter-stats (get-user-stats voter))
+            (author-stats (get-user-stats content-author))
+            (new-votes-cast (+ (get votes-cast voter-stats) u1))
+            (new-votes-received (+ (get votes-received author-stats) u1))
+        )
+        (map-set user-stats
+            { user: voter }
+            (merge voter-stats { votes-cast: new-votes-cast })
+        )
+        (map-set user-stats
+            { user: content-author }
+            (merge author-stats { votes-received: new-votes-received })
+        )
     )
 )
