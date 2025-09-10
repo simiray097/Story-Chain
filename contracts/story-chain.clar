@@ -9,10 +9,23 @@
 (define-constant ERR_REWARD_TRANSFER_FAILED (err u107))
 (define-constant ERR_ALREADY_VOTED (err u108))
 (define-constant ERR_CANNOT_VOTE_OWN_CONTENT (err u109))
+(define-constant ERR_INVALID_CATEGORY (err u110))
+(define-constant ERR_TAG_TOO_LONG (err u111))
 
 (define-constant MAX_SENTENCE_LENGTH u280)
 (define-constant MIN_SENTENCE_LENGTH u5)
 (define-constant MAX_STORIES u1000)
+(define-constant MAX_TAG_LENGTH u20)
+
+(define-constant CATEGORY_FANTASY u1)
+(define-constant CATEGORY_MYSTERY u2)
+(define-constant CATEGORY_ROMANCE u3)
+(define-constant CATEGORY_SCIFI u4)
+(define-constant CATEGORY_HORROR u5)
+(define-constant CATEGORY_ADVENTURE u6)
+(define-constant CATEGORY_COMEDY u7)
+(define-constant CATEGORY_DRAMA u8)
+(define-constant CATEGORY_OTHER u9)
 
 (define-data-var story-counter uint u0)
 (define-data-var total-sentences uint u0)
@@ -28,7 +41,11 @@
         reward-per-sentence: uint,
         reward-pool: uint,
         total-votes: uint,
-        story-score: int
+        story-score: int,
+        category: uint,
+        tag1: (optional (string-ascii 20)),
+        tag2: (optional (string-ascii 20)),
+        tag3: (optional (string-ascii 20))
     }
 )
 
@@ -69,6 +86,16 @@
 (define-map story-votes
     { voter: principal, story-id: uint }
     { vote-type: bool }
+)
+
+(define-map category-counts
+    { category: uint }
+    { count: uint }
+)
+
+(define-map tag-usage
+    { tag: (string-ascii 20) }
+    { usage-count: uint }
 )
 
 (define-read-only (get-story-counter)
@@ -148,7 +175,7 @@
     )
 )
 
-(define-public (create-story (title (string-ascii 100)))
+(define-public (create-story (title (string-ascii 100)) (category uint) (tag1 (optional (string-ascii 20))) (tag2 (optional (string-ascii 20))) (tag3 (optional (string-ascii 20))))
     (let
         (
             (new-story-id (+ (var-get story-counter) u1))
@@ -156,6 +183,8 @@
         )
         (asserts! (> (len title) u0) ERR_EMPTY_SENTENCE)
         (asserts! (<= new-story-id MAX_STORIES) ERR_INVALID_STORY_ID)
+        (asserts! (and (>= category u1) (<= category u9)) ERR_INVALID_CATEGORY)
+        (asserts! (validate-tags tag1 tag2 tag3) ERR_TAG_TOO_LONG)
         
         (map-set stories
             { story-id: new-story-id }
@@ -168,11 +197,19 @@
                 reward-per-sentence: u0,
                 reward-pool: u0,
                 total-votes: u0,
-                story-score: 0
+                story-score: 0,
+                category: category,
+                tag1: tag1,
+                tag2: tag2,
+                tag3: tag3
             }
         )
         
         (var-set story-counter new-story-id)
+        (update-category-count category)
+        (update-tag-usage tag1)
+        (update-tag-usage tag2)
+        (update-tag-usage tag3)
         (update-user-story-creation tx-sender)
         (ok new-story-id)
     )
@@ -466,5 +503,74 @@
             { user: content-author }
             (merge author-stats { votes-received: new-votes-received })
         )
+    )
+)
+
+(define-read-only (get-category-count (category uint))
+    (default-to
+        { count: u0 }
+        (map-get? category-counts { category: category })
+    )
+)
+
+(define-read-only (get-tag-usage (tag (string-ascii 20)))
+    (default-to
+        { usage-count: u0 }
+        (map-get? tag-usage { tag: tag })
+    )
+)
+
+(define-read-only (get-stories-by-category (category uint) (limit uint))
+    (ok (list))
+)
+
+(define-read-only (search-stories-by-tag (tag (string-ascii 20)) (limit uint))
+    (ok (list))
+)
+
+(define-private (validate-tags (tag1 (optional (string-ascii 20))) (tag2 (optional (string-ascii 20))) (tag3 (optional (string-ascii 20))))
+    (and
+        (match tag1 
+            some-tag (and (> (len some-tag) u0) (<= (len some-tag) MAX_TAG_LENGTH))
+            true
+        )
+        (match tag2 
+            some-tag (and (> (len some-tag) u0) (<= (len some-tag) MAX_TAG_LENGTH))
+            true
+        )
+        (match tag3 
+            some-tag (and (> (len some-tag) u0) (<= (len some-tag) MAX_TAG_LENGTH))
+            true
+        )
+    )
+)
+
+(define-private (update-category-count (category uint))
+    (let
+        (
+            (current-count (get count (get-category-count category)))
+            (new-count (+ current-count u1))
+        )
+        (map-set category-counts
+            { category: category }
+            { count: new-count }
+        )
+    )
+)
+
+(define-private (update-tag-usage (tag (optional (string-ascii 20))))
+    (match tag
+        some-tag
+        (let
+            (
+                (current-usage (get usage-count (get-tag-usage some-tag)))
+                (new-usage (+ current-usage u1))
+            )
+            (map-set tag-usage
+                { tag: some-tag }
+                { usage-count: new-usage }
+            )
+        )
+        true
     )
 )
