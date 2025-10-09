@@ -11,6 +11,8 @@
 (define-constant ERR_CANNOT_VOTE_OWN_CONTENT (err u109))
 (define-constant ERR_INVALID_CATEGORY (err u110))
 (define-constant ERR_TAG_TOO_LONG (err u111))
+(define-constant ERR_ALREADY_BOOKMARKED (err u112))
+(define-constant ERR_NOT_BOOKMARKED (err u113))
 
 (define-constant MAX_SENTENCE_LENGTH u280)
 (define-constant MIN_SENTENCE_LENGTH u5)
@@ -45,7 +47,8 @@
         category: uint,
         tag1: (optional (string-ascii 20)),
         tag2: (optional (string-ascii 20)),
-        tag3: (optional (string-ascii 20))
+        tag3: (optional (string-ascii 20)),
+        bookmark-count: uint
     }
 )
 
@@ -74,7 +77,8 @@
         stories-contributed: uint,
         total-rewards-earned: uint,
         votes-cast: uint,
-        votes-received: uint
+        votes-received: uint,
+        bookmarks-count: uint
     }
 )
 
@@ -96,6 +100,11 @@
 (define-map tag-usage
     { tag: (string-ascii 20) }
     { usage-count: uint }
+)
+
+(define-map bookmarks
+    { user: principal, story-id: uint }
+    { bookmarked-at: uint }
 )
 
 (define-read-only (get-story-counter)
@@ -123,7 +132,7 @@
 
 (define-read-only (get-user-stats (user principal))
     (default-to
-        { total-sentences: u0, stories-created: u0, stories-contributed: u0, total-rewards-earned: u0, votes-cast: u0, votes-received: u0 }
+        { total-sentences: u0, stories-created: u0, stories-contributed: u0, total-rewards-earned: u0, votes-cast: u0, votes-received: u0, bookmarks-count: u0 }
         (map-get? user-stats { user: user })
     )
 )
@@ -201,7 +210,8 @@
                 category: category,
                 tag1: tag1,
                 tag2: tag2,
-                tag3: tag3
+                tag3: tag3,
+                bookmark-count: u0
             }
         )
         
@@ -572,5 +582,71 @@
             )
         )
         true
+    )
+)
+
+(define-read-only (get-bookmark (user principal) (story-id uint))
+    (map-get? bookmarks { user: user, story-id: story-id })
+)
+
+(define-read-only (is-bookmarked (user principal) (story-id uint))
+    (is-some (get-bookmark user story-id))
+)
+
+(define-public (bookmark-story (story-id uint))
+    (let
+        (
+            (story-data (unwrap! (get-story story-id) ERR_STORY_NOT_FOUND))
+            (existing-bookmark (get-bookmark tx-sender story-id))
+            (current-block stacks-block-height)
+            (current-bookmark-count (get bookmark-count story-data))
+        )
+        (asserts! (is-none existing-bookmark) ERR_ALREADY_BOOKMARKED)
+        
+        (map-set bookmarks
+            { user: tx-sender, story-id: story-id }
+            { bookmarked-at: current-block }
+        )
+        
+        (map-set stories
+            { story-id: story-id }
+            (merge story-data { bookmark-count: (+ current-bookmark-count u1) })
+        )
+        
+        (update-user-bookmark-stats tx-sender true)
+        (ok true)
+    )
+)
+
+(define-public (remove-bookmark (story-id uint))
+    (let
+        (
+            (story-data (unwrap! (get-story story-id) ERR_STORY_NOT_FOUND))
+            (existing-bookmark (unwrap! (get-bookmark tx-sender story-id) ERR_NOT_BOOKMARKED))
+            (current-bookmark-count (get bookmark-count story-data))
+        )
+        (map-delete bookmarks { user: tx-sender, story-id: story-id })
+        
+        (map-set stories
+            { story-id: story-id }
+            (merge story-data { bookmark-count: (- current-bookmark-count u1) })
+        )
+        
+        (update-user-bookmark-stats tx-sender false)
+        (ok true)
+    )
+)
+
+(define-private (update-user-bookmark-stats (user principal) (is-adding bool))
+    (let
+        (
+            (current-stats (get-user-stats user))
+            (current-count (get bookmarks-count current-stats))
+            (new-count (if is-adding (+ current-count u1) (- current-count u1)))
+        )
+        (map-set user-stats
+            { user: user }
+            (merge current-stats { bookmarks-count: new-count })
+        )
     )
 )
