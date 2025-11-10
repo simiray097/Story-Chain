@@ -13,6 +13,7 @@
 (define-constant ERR_TAG_TOO_LONG (err u111))
 (define-constant ERR_ALREADY_BOOKMARKED (err u112))
 (define-constant ERR_NOT_BOOKMARKED (err u113))
+(define-constant ERR_TIP_TRANSFER_FAILED (err u114))
 
 (define-constant MAX_SENTENCE_LENGTH u280)
 (define-constant MIN_SENTENCE_LENGTH u5)
@@ -648,5 +649,35 @@
             { user: user }
             (merge current-stats { bookmarks-count: new-count })
         )
+    )
+)
+
+(define-map sentence-tips
+    { story-id: uint, sentence-id: uint }
+    { total-tips: uint }
+)
+
+(define-read-only (get-sentence-tips (story-id uint) (sentence-id uint))
+    (default-to
+        { total-tips: u0 }
+        (map-get? sentence-tips { story-id: story-id, sentence-id: sentence-id })
+    )
+)
+
+(define-public (tip-sentence (story-id uint) (sentence-id uint) (amount uint))
+    (let
+        (
+            (sentence-data (unwrap! (get-sentence story-id sentence-id) ERR_STORY_NOT_FOUND))
+            (author (get author sentence-data))
+            (current-total (get total-tips (get-sentence-tips story-id sentence-id)))
+            (new-total (+ current-total amount))
+        )
+        (asserts! (> amount u0) ERR_INSUFFICIENT_FUNDS)
+        (unwrap! (stx-transfer? amount tx-sender author) ERR_TIP_TRANSFER_FAILED)
+        (map-set sentence-tips
+            { story-id: story-id, sentence-id: sentence-id }
+            { total-tips: new-total }
+        )
+        (ok new-total)
     )
 )
